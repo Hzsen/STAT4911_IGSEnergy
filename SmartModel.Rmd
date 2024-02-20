@@ -1,0 +1,142 @@
+---
+title: "SmartCharge"
+author: "Andrew Kramer"
+date: "2024-02-15"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+setwd("~/Desktop/DACapstone/IGS")
+library(tidyverse)
+library(lpSolve)
+library(readxl)
+library(lubridate)
+library(dplyr)
+
+optimal_b <- read.csv("optimal_account_b.csv")
+optimal_a <- read.csv("optimal_account_a.csv")
+optimal_a <- optimal_a[-7338,]
+optimal_b <- optimal_b[-7344,]
+
+optimal <- optimal_a
+```
+
+```{r}
+n_training_days <- 14
+training_days <- c()
+total_costs <- c()
+remaining_charge <- 0
+
+for(i in 1:length(unique(optimal$DATE))){
+  day <- unique(optimal$DATE)[i]
+  power_day <- optimal[optimal$DATE == day,]
+  for(k in 1:n_training_days){
+    training_days[k] <- as.Date(day) - k
+    if(lubridate::year(as.Date(training_days[k])) == 2022)
+    {
+      training_days[k] <- training_days[k] + 365
+    }
+  }
+  #hours <- sum(optimal$DATE %in% as.Date(training_days))
+  
+  ##// mean algorithm
+  weekdays <- optimal[!as.logical(optimal$Weekend) & optimal$DATE %in% as.Date(training_days),]
+  weekends <- optimal[as.logical(optimal$Weekend) & optimal$DATE %in% as.Date(training_days),]
+  
+  for(i in 1:nrow(weekdays)){
+    if(weekdays(as.Date(weekdays$DATE[i])) == 'Sunday' | weekdays(as.Date(weekdays$DATE[i])) == 'Saturday'){
+      weekdays$Weekend[i] <- 1
+    }
+    else{
+      weekdays$Weekend[i] <- 0
+    }
+  }
+  
+  for(i in 1:nrow(weekends)){
+    if(weekdays(as.Date(weekends$DATE[i])) == 'Sunday' | weekdays(as.Date(weekends$DATE[i])) == 'Saturday'){
+      weekends$Weekend[i] <- 1
+    }
+    else{
+      weekends$Weekend[i] <- 0
+    }
+  }
+  
+  c_weekdays_means <- by(weekdays$charge_amt, weekdays$Hour, mean)
+  c_weekends_means <- by(weekends$charge_amt, weekends$Hour, mean)
+  
+  d_weekdays_means <- by(weekdays$discharge_amt, weekdays$Hour, mean)
+  d_weekends_means <- by(weekends$discharge_amt, weekends$Hour, mean)
+
+  if(as.logical(power_day$Weekend[1])){
+    charge_means <- c_weekdays_means * .1 + c_weekends_means * .9
+    discharge_means <- d_weekdays_means * .1 + d_weekends_means * .9
+  } else {
+    charge_means <- c_weekdays_means * .9 + c_weekends_means * .1
+    discharge_means <- d_weekdays_means * .9 + d_weekends_means * .1
+  }
+  
+  charging_pattern <- c()
+  total_charge <- 0
+  costs <- c()
+  charges <- c()
+  
+  state_hr <- c(remaining_charge, 0, 0, 0, 0, 0, 0)
+  
+  for(j in 1:nrow(power_day)){
+    
+    state_hr <- c(state_hr[1], charge_means[j], discharge_means[j], power_day$Settlement.Point.Price[j], power_day$QUANTITY[j], 0, j)
+    
+    if(total_charge < 13.5){
+      if(state_hr[2] > 1 | (j >= 0 & j <= 4)){
+        state_hr <- charge(state_hr)
+      } else {
+        state_hr <- discharge(state_hr)
+      }
+    } else {
+      state_hr <- discharge(state_hr)
+    }
+    if(state_hr[5] > 0){
+      state_hr[6] <- state_hr[6] + state_hr[4] * state_hr[5]
+      state_hr[5] <- 0
+    }
+    costs[j] <- state_hr[6]
+    charges[j] <- state_hr[1]
+  }
+  total_costs <- append(total_costs, costs)
+  remaining_charge <- state_hr[1]
+}
+sum(total_costs)
+#3966514
+```
+
+```{r}
+charge <- function(state_hr){
+
+  if(state_hr[1] <= 13.5 - 5){
+    state_hr[1] <- state_hr[1] + 5
+    state_hr[6] <- state_hr[6] + state_hr[4] * 5
+  } else if(state_hr[1] < 13.5){
+    remaining_charge <- 13.5 - state_hr[1]
+    state_hr[6] <- state_hr[6] + remaining_charge * state_hr[4]
+    state_hr[1] <- 13.5
+  }
+  return (state_hr)
+}
+```
+
+```{r}
+discharge <- function(state_hr){
+  prop <- 1
+  
+  if(state_hr[1] - prop * state_hr[3] >= 0){
+    state_hr[5] <- state_hr[5] - prop * state_hr[3]
+    state_hr[1] <- state_hr[1] - prop * state_hr[3]
+  } else if (state_hr[5] - total_charge >= 0){
+    state_hr[5] <- state_hr[5] - total_charge
+    state_hr[1] <- 0
+  }
+  return (state_hr)
+}
+```
+
+
